@@ -52,6 +52,7 @@ typedef enum {
 typedef struct {
     PopplerDocument *doc;
     PopplerPage     *page;
+    PopplerAnnot    *active_annot;
 
     GtkWidget       *tree_view;
     GtkListStore    *model;
@@ -67,10 +68,12 @@ typedef struct {
     ModeType         mode;
 
     cairo_surface_t *surface;
+    GdkRGBA          annot_color;
 
     GdkPoint         start;
     GdkPoint         stop;
     GdkCursorType    cursor;
+    guint            annotations_idle;
 } PgdAnnotsDemo;
 
 static void pgd_annots_viewer_queue_redraw (PgdAnnotsDemo *demo);
@@ -80,6 +83,11 @@ pgd_annots_free (PgdAnnotsDemo *demo)
 {
     if (!demo)
         return;
+
+    if (demo->annotations_idle > 0) {
+        g_source_remove (demo->annotations_idle);
+        demo->annotations_idle = 0;
+    }
 
     if (demo->doc) {
         g_object_unref (demo->doc);
@@ -433,6 +441,18 @@ pgd_annot_view_set_annot_text (GtkWidget        *table,
 }
 
 static void
+pgd_annot_color_changed (GtkButton     *button,
+                         GParamSpec    *pspec,
+                         PgdAnnotsDemo *demo)
+{
+#if GTK_CHECK_VERSION(3,4,0)
+    gtk_color_chooser_get_rgba (GTK_COLOR_CHOOSER (button), &demo->annot_color);
+#else
+    gtk_color_button_get_rgba (GTK_COLOR_BUTTON (button), &demo->annot_color);
+#endif
+}
+
+static void
 pgd_annot_view_set_annot_free_text (GtkWidget            *table,
                                     PopplerAnnotFreeText *annot,
                                     gint                 *row)
@@ -628,12 +648,13 @@ pgd_annot_view_set_annot (PgdAnnotsDemo *demo,
 static void
 pgd_annots_add_annot_to_model (PgdAnnotsDemo *demo,
                                PopplerAnnot *annot,
-                               PopplerRectangle area)
+                               PopplerRectangle area,
+                               gboolean selected)
 {
-    GtkTreeIter          iter;
-    GdkPixbuf           *pixbuf;
-    PopplerAnnotFlag     flags;
-    gchar               *x1, *y1, *x2, *y2;
+    GtkTreeIter      iter;
+    GdkPixbuf        *pixbuf;
+    PopplerAnnotFlag  flags;
+    gchar            *x1, *y1, *x2, *y2;
 
     x1 = g_strdup_printf ("%.2f", area.x1);
     y1 = g_strdup_printf ("%.2f", area.y1);
@@ -656,6 +677,14 @@ pgd_annots_add_annot_to_model (PgdAnnotsDemo *demo,
                         ANNOTS_FLAG_PRINT_COLUMN, (flags & POPPLER_ANNOT_FLAG_PRINT),
                         ANNOTS_COLUMN, annot,
                         -1);
+
+    if (selected) {
+        GtkTreePath *path;
+
+        path = gtk_tree_model_get_path (GTK_TREE_MODEL (demo->model), &iter);
+        gtk_tree_view_set_cursor (GTK_TREE_VIEW (demo->tree_view), path, NULL, FALSE);
+        gtk_tree_path_free (path);
+    }
 
     if (pixbuf)
         g_object_unref (pixbuf);
@@ -707,7 +736,8 @@ pgd_annots_get_annots (PgdAnnotsDemo *demo)
         PopplerAnnotMapping *amapping;
 
         amapping = (PopplerAnnotMapping *) l->data;
-        pgd_annots_add_annot_to_model (demo, amapping->annot, amapping->area);
+        pgd_annots_add_annot_to_model (demo, amapping->annot,
+                                       amapping->area, FALSE);
     }
 
     poppler_page_free_annot_mapping (mapping);
@@ -807,6 +837,7 @@ static void
 pgd_annots_add_annot (PgdAnnotsDemo *demo)
 {
     PopplerRectangle  rect;
+    PopplerColor      color;
     PopplerAnnot     *annot;
     gdouble           height;
 
@@ -819,17 +850,37 @@ pgd_annots_add_annot (PgdAnnotsDemo *demo)
     rect.x2 = demo->stop.x;
     rect.y2 = height - demo->stop.y;
 
+    color.red = CLAMP ((guint) (demo->annot_color.red * 65535), 0, 65535);
+    color.green = CLAMP ((guint) (demo->annot_color.green * 65535), 0, 65535);
+    color.blue = CLAMP ((guint) (demo->annot_color.blue * 65535), 0, 65535);
+
     switch (demo->annot_type) {
         case POPPLER_ANNOT_TEXT:
             annot = poppler_annot_text_new (demo->doc, &rect);
 
             break;
+        case POPPLER_ANNOT_LINE: {
+            PopplerPoint start, end;
+
+            start.x = rect.x1;
+            start.y = rect.y1;
+            end.x = rect.x2;
+            end.y = rect.y2;
+
+            annot = poppler_annot_line_new (demo->doc, &rect);
+            poppler_annot_line_set_vertices (POPPLER_ANNOT_LINE (annot),
+                                             &start, &end);
+        }
+            break;
         default:
             g_assert_not_reached ();
     }
 
+    demo->active_annot = annot;
+
+    poppler_annot_set_color (annot, &color);
     poppler_page_add_annot (demo->page, annot);
-    pgd_annots_add_annot_to_model (demo, annot, rect);
+    pgd_annots_add_annot_to_model (demo, annot, rect, TRUE);
     g_object_unref (annot);
 }
 
@@ -839,6 +890,7 @@ pgd_annots_finish_add_annot (PgdAnnotsDemo *demo)
     g_assert (demo->mode == MODE_ADD || demo->mode == MODE_DRAWING);
 
     demo->mode = MODE_NORMAL;
+    demo->start.x = -1;
     pgd_annots_update_cursor (demo, GDK_LAST_CURSOR);
     pgd_annots_viewer_queue_redraw (demo);
 
@@ -909,13 +961,17 @@ pgd_annots_viewer_redraw (PgdAnnotsDemo *demo)
 
     gtk_widget_queue_draw (demo->darea);
 
+    demo->annotations_idle = 0;
+
     return FALSE;
 }
 
 static void
 pgd_annots_viewer_queue_redraw (PgdAnnotsDemo *demo)
 {
-    g_idle_add ((GSourceFunc)pgd_annots_viewer_redraw, demo);
+    if (demo->annotations_idle == 0)
+        demo->annotations_idle = g_idle_add ((GSourceFunc)pgd_annots_viewer_redraw,
+                                             demo);
 }
 
 static void
@@ -944,6 +1000,44 @@ pgd_annots_drawing_area_button_press (GtkWidget      *area,
     pgd_annots_add_annot (demo);
     pgd_annots_viewer_queue_redraw (demo);
     demo->mode = MODE_DRAWING;
+
+    return TRUE;
+}
+
+static gboolean
+pgd_annots_drawing_area_motion_notify (GtkWidget      *area,
+                                       GdkEventMotion *event,
+                                       PgdAnnotsDemo  *demo)
+{
+    PopplerRectangle rect;
+    PopplerPoint start, end;
+    gdouble width, height;
+
+    if (!demo->page || demo->mode != MODE_DRAWING || demo->start.x == -1)
+        return FALSE;
+
+    demo->stop.x = event->x;
+    demo->stop.y = event->y;
+
+    poppler_page_get_size (demo->page, &width, &height);
+
+    /* Keep the drawing within the page */
+    demo->stop.x = CLAMP (demo->stop.x, 0, width);
+    demo->stop.y = CLAMP (demo->stop.y, 0, height);
+
+    rect.x1 = start.x = demo->start.x;
+    rect.y1 = start.y = height - demo->start.y;
+    rect.x2 = end.x = demo->stop.x;
+    rect.y2 = end.y = height - demo->stop.y;
+
+    poppler_annot_set_rectangle (demo->active_annot, &rect);
+
+    if (demo->annot_type == POPPLER_ANNOT_LINE)
+        poppler_annot_line_set_vertices (POPPLER_ANNOT_LINE (demo->active_annot),
+                                         &start, &end);
+
+    pgd_annot_view_set_annot (demo, demo->active_annot);
+    pgd_annots_viewer_queue_redraw (demo);
 
     return TRUE;
 }
@@ -1034,6 +1128,12 @@ pgd_annots_create_widget (PopplerDocument *document)
                         SELECTED_TYPE_COLUMN, POPPLER_ANNOT_TEXT,
                         SELECTED_LABEL_COLUMN, "Text",
                         -1);
+
+    gtk_list_store_append (model, &iter);
+    gtk_list_store_set (model, &iter,
+                        SELECTED_TYPE_COLUMN, POPPLER_ANNOT_LINE,
+                        SELECTED_LABEL_COLUMN, "Line",
+                        -1);
     demo->type_selector = gtk_combo_box_new_with_model (GTK_TREE_MODEL (model));
     g_object_unref (model);
 
@@ -1045,6 +1145,20 @@ pgd_annots_create_widget (PopplerDocument *document)
     gtk_combo_box_set_active (GTK_COMBO_BOX (demo->type_selector), 0);
     gtk_box_pack_end (GTK_BOX (hbox), demo->type_selector, FALSE, FALSE, 0);
     gtk_widget_show (demo->type_selector);
+
+    button = gtk_color_button_new ();
+    demo->annot_color.red = 65535;
+    demo->annot_color.alpha = 1.0;
+#if GTK_CHECK_VERSION(3,4,0)
+    gtk_color_chooser_set_rgba (GTK_COLOR_CHOOSER (button), &demo->annot_color);
+#else
+    gtk_color_button_set_rgba (GTK_COLOR_BUTTON (button), &demo->annot_color);
+#endif
+    g_signal_connect (button, "notify::color",
+                      G_CALLBACK (pgd_annot_color_changed),
+                      (gpointer)demo);
+    gtk_box_pack_end (GTK_BOX (hbox), button, FALSE, TRUE, 0);
+    gtk_widget_show (button);
 
     gtk_widget_show (hbox);
 
@@ -1168,6 +1282,9 @@ pgd_annots_create_widget (PopplerDocument *document)
                       (gpointer)demo);
     g_signal_connect (demo->darea, "button_press_event",
                       G_CALLBACK (pgd_annots_drawing_area_button_press),
+                      (gpointer)demo);
+    g_signal_connect (demo->darea, "motion_notify_event",
+                      G_CALLBACK (pgd_annots_drawing_area_motion_notify),
                       (gpointer)demo);
     g_signal_connect (demo->darea, "button_release_event",
                       G_CALLBACK (pgd_annots_drawing_area_button_release),
