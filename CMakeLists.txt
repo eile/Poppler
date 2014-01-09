@@ -17,8 +17,8 @@ include(CheckFileOffsetBits)
 CHECK_FILE_OFFSET_BITS()
 
 set(POPPLER_MAJOR_VERSION "0")
-set(POPPLER_MINOR_VERSION "24")
-set(POPPLER_MICRO_VERSION "3")
+set(POPPLER_MINOR_VERSION "25")
+set(POPPLER_MICRO_VERSION "1")
 set(POPPLER_VERSION "${POPPLER_MAJOR_VERSION}.${POPPLER_MINOR_VERSION}.${POPPLER_MICRO_VERSION}")
 
 # command line switches
@@ -306,6 +306,7 @@ set(poppler_SRCS
   poppler/Link.cc
   poppler/Linearization.cc
   poppler/LocalPDFDocBuilder.cc
+  poppler/MarkedContentOutputDev.cc
   poppler/NameToCharCode.cc
   poppler/Object.cc
   poppler/OptionalContent.cc
@@ -427,7 +428,7 @@ add_library(poppler STATIC ${poppler_SRCS})
 else(MSVC)
 add_library(poppler SHARED ${poppler_SRCS})
 endif(MSVC)
-set_target_properties(poppler PROPERTIES VERSION 43.0.0 SOVERSION 43)
+set_target_properties(poppler PROPERTIES VERSION 45.0.0 SOVERSION 45)
 target_link_libraries(poppler ${poppler_LIBS})
 target_link_libraries(poppler LINK_INTERFACE_LIBRARIES "")
 install(TARGETS poppler RUNTIME DESTINATION bin LIBRARY DESTINATION lib${LIB_SUFFIX} ARCHIVE DESTINATION lib${LIB_SUFFIX})
@@ -464,6 +465,7 @@ if(ENABLE_XPDF_HEADERS)
     poppler/Link.h
     poppler/Linearization.h
     poppler/LocalPDFDocBuilder.h
+    poppler/MarkedContentOutputDev.h
     poppler/Movie.h
     poppler/NameToCharCode.h
     poppler/Object.h
