@@ -1,3 +1,5 @@
 add_subdirectory(src)
-add_subdirectory(tests)
+if(EXISTS ${TESTDATADIR})
+  add_subdirectory(tests)
+endif()
 add_subdirectory(demos)
